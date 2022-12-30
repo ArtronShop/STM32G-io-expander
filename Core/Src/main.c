@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include<stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,7 +63,7 @@ uint8_t reg_offset = 0;
 volatile uint8_t reg_data[8] = {
     0x00, // Input port 0
     0x00, // Input port 1
-    0x00, // Output port 0
+    0b00000000, // Output port 0, ON F2, F4, F6, F8 by default
     0x00, // Output port 1
     0x00, // Polarity Inversion port 0
     0x00, // Polarity Inversion port 1
@@ -71,11 +71,14 @@ volatile uint8_t reg_data[8] = {
     0x00  // Configuration port 1
 };
 uint8_t i2c_state = 0;
+uint32_t last_i2c_req_time = 0;
 
 HAL_StatusTypeDef I2C_Slave_isr(struct __I2C_HandleTypeDef *hi2c, uint32_t ITFlags, uint32_t ITSources) {
   if (hi2c->Instance->ISR & (I2C_ISR_ADDR)) {
     /* Clear ADDR flag */
     __HAL_I2C_CLEAR_FLAG(hi2c, I2C_FLAG_ADDR);
+
+    last_i2c_req_time = HAL_GetTick();
   }
 
   if (hi2c->Instance->ISR & (I2C_ISR_RXNE)) {
@@ -115,6 +118,29 @@ HAL_StatusTypeDef I2C_Slave_isr(struct __I2C_HandleTypeDef *hi2c, uint32_t ITFla
 
   return HAL_OK;
 }
+
+static void I2C_Slave_init() {
+  // ====|| I2C Slave setup with interrupt ||====
+
+  /* Enable Address Acknowledge */
+  hi2c1.Instance->CR2 &= ~I2C_CR2_NACK;
+
+  // Set isr function
+  hi2c1.XferISR = I2C_Slave_isr;
+
+  // Enable I2C interrup
+  __HAL_I2C_ENABLE_IT(&hi2c1, I2C_IT_ADDRI | I2C_IT_STOPI | I2C_IT_TXI | I2C_IT_RXI);
+
+  // ====|| END ||====
+
+  i2c_state = 0;
+}
+
+bool i2c_error_detect = false;
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+  i2c_error_detect = true;
+}
 /* USER CODE END 0 */
 
 /**
@@ -151,28 +177,32 @@ int main(void)
   /* Initialize interrupts */
   MX_NVIC_Init();
   /* USER CODE BEGIN 2 */
-  // ====|| I2C Slave setup with interrupt ||====
-
-  /* Enable Address Acknowledge */
-  hi2c1.Instance->CR2 &= ~I2C_CR2_NACK;
-
-  // Set isr function
-  hi2c1.XferISR = I2C_Slave_isr;
-
-  // Enable I2C interrup
-  __HAL_I2C_ENABLE_IT(&hi2c1, I2C_IT_ADDRI | I2C_IT_STOPI | I2C_IT_TXI | I2C_IT_RXI);
-
-  // ====|| END ||====
+  I2C_Slave_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /*
+    if ((HAL_GetTick() > last_i2c_req_time) && ((HAL_GetTick() - last_i2c_req_time) > (30 * 1000))) { // Host not send over 30 s
+      // so host down ?
+      reg_data[2] = 0b00000000; // Output port 0, ON F2, F4, F6, F8 by default
+      reg_data[3] = 0b00000000; // Output port 1, OFF All
+    }*/
     GPIOA->ODR = (GPIOA->ODR & 0xFF00) | reg_data[2];
     GPIOB->ODR = (GPIOB->ODR & 0xFF00) | reg_data[3];
+    if (i2c_error_detect) {
+      i2c_error_detect = false;
+
+      HAL_I2C_DeInit(&hi2c1);
+
+      // Init again
+      MX_I2C1_Init();
+      I2C_Slave_init();
+    }
     HAL_IWDG_Refresh(&hiwdg);
-    HAL_Delay(10);
+    HAL_Delay(50);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -249,7 +279,7 @@ static void MX_I2C1_Init(void)
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.Timing = 0x00303D5B;
-  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.OwnAddress1 = 66;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
